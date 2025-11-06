@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eco-Challenge: Simulador de Analista Financiero</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // Importaciones de Firebase (necesarias para la base de datos Firestore)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc, collection, query, limit, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Variables Globales del Entorno (MANDATORIO para Canvas) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = {
+  apiKey: "AIzaSyCjW-VLPOQ9n2akZTU3TnprM6iFQvEqsY0",
+  authDomain: "eco-challenger.firebaseapp.com",
+  projectId: "eco-challenger",
+  storageBucket: "eco-challenger.firebasestorage.app",
+  messagingSenderId: "925233443384",
+  appId: "1:925233443384:web:737cd67f522656da766ccd"
+};
+
+        let db;
+        let auth;
+        let userId = null;
+        let gameState = null;
+        let currentMission = null;
+
+        // --- Configuración del Juego ---
+        
+        // Estado inicial de un nuevo jugador
+        const INITIAL_STATE = {
+            ecCoins: 100, // Moneda inicial para que el alumno pueda interactuar con la tienda.
+            xp: 0,
+            level: 1,
+            missionsCompleted: 0
+        };
+
+        // Niveles y XP necesario para ascender
+        const LEVELS = [
+            { level: 1, title: 'Novato', xpNeeded: 0 },
+            { level: 2, title: 'Analista Junior', xpNeeded: 150 },
+            { level: 3, title: 'Estratega Senior', xpNeeded: 400 },
+            { level: 4, title: 'Director Financiero', xpNeeded: 800 } // Nivel máximo en el ejemplo
+        ];
+
+        // Productos de la tienda (Recompensas académicas para canjear)
+        const SHOP_ITEMS = [
+            { id: 101, name: "Comodín de Pista", cost: 75, benefit: "Permite recibir una pista o un 'tip' para la siguiente Misión difícil." },
+            { id: 102, name: "Mejora de Puntuación", cost: 150, benefit: "Suma +5 puntos extra a la nota final de una tarea de bajo peso." },
+            { id: 103, name: "Asesoría Rápida (5 min)", cost: 200, benefit: "Canjeable por una tutoría rápida de 5 minutos fuera de horario." },
+        ];
+
+
+        // Definición de misiones (se repiten cíclicamente)
+        const missions = [
+            {
+                id: 1,
+                title: "¿Qué es la Escasez?",
+                type: 'quiz',
+                question: "¿Cuál es el concepto económico fundamental que explica la necesidad de tomar decisiones?",
+                options: [
+                    { text: "Inflación", correct: false },
+                    { text: "Oferta y Demanda", correct: false },
+                    { text: "Escasez", correct: true },
+                    { text: "Interés Compuesto", correct: false }
+                ],
+                rewardXP: 50,
+                rewardEC: 25,
+                concept: "Conceptos Fundamentales"
+            },
+            {
+                id: 2,
+                title: "Balance de Presupuesto",
+                type: 'input_simulation',
+                question: "Tienes $2000 virtuales. Si tus gastos fijos son $1500, ¿cuánto debes asignar al AHORRO para que tu meta sea el 15% de tu ingreso?",
+                concept: "Finanzas Personales",
+                answer: 300, // 2000 * 0.15 = 300
+                rewardXP: 75,
+                rewardEC: 40
+            },
+            {
+                id: 3,
+                title: "Riesgo vs. Retorno",
+                type: 'quiz',
+                question: "Si una inversión tiene un potencial de ganancia muy alto, ¿cómo suele ser su nivel de riesgo?",
+                options: [
+                    { text: "Bajo (inversión segura)", correct: false },
+                    { text: "Alto (mayor riesgo = mayor retorno potencial)", correct: true },
+                    { text: "No está relacionado", correct: false }
+                ],
+                rewardXP: 100,
+                rewardEC: 50,
+                concept: "Inversión y Riesgo"
+            }
+        ];
+        // --- Fin de Configuración del Juego ---
+
+
+        // Obtiene la misión actual basada en las misiones completadas (cíclico)
+        function getCurrentMission() {
+            const nextMissionIndex = gameState.missionsCompleted % missions.length;
+            return missions[nextMissionIndex];
+        }
+
+        // --- Funcionalidad de Firebase y Persistencia de Datos ---
+
+        // Función para mostrar mensajes de estado con color
+        function alertUser(message, className) {
+            const messageElement = document.getElementById('status-message');
+            messageElement.className = `text-center font-bold mb-4 ${className}`;
+            messageElement.textContent = message;
+        }
+
+        // Función de inicialización de Firebase y Autenticación
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Habilitar logging para depuración (opcional, pero útil)
+                setLogLevel('debug'); 
+
+                // Autenticación inicial usando el token proporcionado o anónima
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Esperar el cambio de estado de autenticación para obtener el userId
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        startListeningToState();
+                    } else {
+                        // Si falla la autenticación, usar un ID temporal (no persistente)
+                        userId = crypto.randomUUID();
+                        console.error("Autenticación fallida o cerrada. Usando ID temporal.");
+                        startListeningToState(); // Intentar cargar el estado incluso con ID temporal
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error durante la inicialización de Firebase:", error);
+                alertUser("Error al conectar con la base de datos.", "text-red-400");
+            }
+        }
+
+        // Función para escuchar el estado del juego en tiempo real (onSnapshot)
+        function startListeningToState() {
+            if (!db || !userId) return;
+
+            // Ruta de guardado: artifacts/{appId}/users/{userId}/eco_challenge/gameState
+            const userStateRef = doc(db, `artifacts/${appId}/users/${userId}/eco_challenge/gameState`);
+            
+            onSnapshot(userStateRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    gameState = docSnap.data();
+                    console.log("Estado cargado:", gameState);
+                } else {
+                    // Si no existe, inicializar el estado y guardarlo
+                    gameState = INITIAL_STATE;
+                    saveGameState();
+                    console.log("Estado inicializado.");
+                }
+                renderGame();
+            }, (error) => {
+                console.error("Error al escuchar el estado:", error);
+                alertUser("Error de sincronización con el juego.", "text-red-400");
+            });
+        }
+
+        // Función para guardar el estado del juego
+        async function saveGameState() {
+            if (!db || !userId || !gameState) return;
+
+            const userStateRef = doc(db, `artifacts/${appId}/users/${userId}/eco_challenge/gameState`);
+            try {
+                await setDoc(userStateRef, gameState, { merge: true });
+                console.log("Estado guardado con éxito.");
+            } catch (error) {
+                console.error("Error al guardar el estado:", error);
+            }
+        }
+
+        // --- Lógica del Juego y UI ---
+
+        // Función principal de renderizado
+        function renderGame() {
+            if (!gameState) {
+                document.getElementById('game-area').innerHTML = `
+                    <div class="text-center text-gray-400 p-8">Cargando datos del Analista...</div>
+                `;
+                return;
+            }
+
+            renderDashboard();
+            renderMissionCard();
+        }
+
+        // Renderiza el panel de control (Dashboard)
+        function renderDashboard() {
+            const currentLevel = LEVELS.find(l => l.level === gameState.level) || LEVELS[LEVELS.length - 1];
+            const nextLevel = LEVELS.find(l => l.level === gameState.level + 1);
+
+            const xpProgress = nextLevel ? Math.min(100, (gameState.xp / nextLevel.xpNeeded) * 100) : 100;
+            const xpText = nextLevel ? `${gameState.xp} / ${nextLevel.xpNeeded} XP` : `${gameState.xp} XP (Nivel Máximo)`;
+
+            const dashboardHTML = `
+                <div class="flex flex-col sm:flex-row justify-between items-center space-y-4 sm:space-y-0 text-center">
+                    <div class="bg-blue-800 p-4 rounded-xl shadow-lg w-full sm:w-1/3">
+                        <p class="text-2xl font-extrabold text-white">${gameState.ecCoins} EC</p>
+                        <p class="text-xs text-blue-300 uppercase tracking-widest">Eco-Coins (Moneda)</p>
+                    </div>
+                    <div class="bg-gray-700 p-4 rounded-xl shadow-lg w-full sm:w-1/3">
+                        <p class="text-lg font-bold text-yellow-400">${currentLevel.title}</p>
+                        <p class="text-sm text-gray-300">Nivel ${gameState.level}</p>
+                    </div>
+                    <div class="bg-blue-800 p-4 rounded-xl shadow-lg w-full sm:w-1/3">
+                        <p class="text-xl font-extrabold text-white">${gameState.missionsCompleted}</p>
+                        <p class="text-xs text-blue-300 uppercase tracking-widest">Misiones Resueltas</p>
+                    </div>
+                </div>
+
+                <div class="mt-6 p-4 bg-gray-800 rounded-xl shadow-lg">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-2">PROGRESO DE ANALISTA (XP)</h3>
+                    <div class="w-full bg-gray-700 rounded-full h-3">
+                        <div class="bg-green-500 h-3 rounded-full transition-all duration-500" style="width: ${xpProgress}%"></div>
+                    </div>
+                    <p class="text-xs mt-1 text-gray-400">${xpText}</p>
+                </div>
+
+                <button onclick="showRulesModal(true)" class="mt-4 w-full p-3 bg-yellow-600 rounded-lg font-bold text-gray-900 hover:bg-yellow-500 transition-colors duration-200 shadow-md">
+                    Ver Reglas y Tienda de Recompensas
+                </button>
+            `;
+            document.getElementById('dashboard').innerHTML = dashboardHTML;
+            document.getElementById('user-id-display').textContent = `ID de Sesión: ${userId || 'N/A'}`;
+        }
+
+        // Renderiza la tarjeta de la misión actual
+        function renderMissionCard() {
+            currentMission = getCurrentMission();
+            let contentHTML = '';
+
+            if (currentMission.type === 'quiz') {
+                // Renderizado para misiones de tipo Quiz
+                contentHTML = `
+                    <div class="space-y-3 mt-4">
+                        ${currentMission.options.map((option, index) => `
+                            <button onclick="checkMissionAnswer(${currentMission.id}, '${option.text}')" 
+                                class="w-full text-left p-3 border-2 border-blue-600 rounded-lg hover:bg-blue-700 transition-colors duration-200">
+                                ${String.fromCharCode(65 + index)}. ${option.text}
+                            </button>
+                        `).join('')}
+                    </div>
+                `;
+            } else if (currentMission.type === 'input_simulation') {
+                // Renderizado para misiones de tipo Input/Simulación
+                contentHTML = `
+                    <div class="mt-4">
+                        <input type="number" id="mission-input" placeholder="Introduce tu respuesta (solo número)"
+                               class="w-full p-3 rounded-lg border-2 border-gray-600 bg-gray-900 text-white focus:ring-2 focus:ring-green-500 focus:border-green-500">
+                        <button onclick="checkMissionAnswer(${currentMission.id}, document.getElementById('mission-input').value)" 
+                                class="mt-4 w-full p-3 bg-green-600 rounded-lg font-bold hover:bg-green-700 transition-colors duration-200">
+                            Enviar Simulación
+                        </button>
+                    </div>
+                `;
+            }
+
+            const missionCardHTML = `
+                <div class="p-6 bg-gray-800 rounded-xl shadow-2xl">
+                    <h2 class="text-xl font-bold text-white mb-2">${currentMission.title}</h2>
+                    <p class="text-sm text-blue-400 mb-4 border-b border-gray-700 pb-2">${currentMission.concept}</p>
+                    <div class="bg-gray-700 p-4 rounded-lg text-white font-medium">${currentMission.question}</div>
+                    
+                    ${contentHTML}
+
+                    <div class="mt-6 flex justify-between text-sm text-gray-400">
+                        <span><span class="text-yellow-400 font-bold">${currentMission.rewardXP} XP</span></span>
+                        <span><span class="text-green-400 font-bold">${currentMission.rewardEC} EC</span></span>
+                    </div>
+                </div>
+            `;
+            document.getElementById('mission-card').innerHTML = missionCardHTML;
+        }
+
+        // Manejador de respuesta de misión (Global para HTML)
+        window.checkMissionAnswer = (missionId, answer) => {
+            const mission = missions.find(m => m.id === missionId);
+            let isCorrect = false;
+
+            if (mission.type === 'quiz') {
+                const selectedOption = mission.options.find(opt => opt.text === answer);
+                isCorrect = selectedOption && selectedOption.correct;
+            } else if (mission.type === 'input_simulation') {
+                const numericalAnswer = parseFloat(answer);
+                isCorrect = numericalAnswer === mission.answer;
+            }
+            
+            if (isCorrect) {
+                // Actualizar estado del jugador
+                gameState.xp += mission.rewardXP;
+                gameState.ecCoins += mission.rewardEC;
+                gameState.missionsCompleted += 1;
+                
+                // Verificar ascenso de nivel
+                const currentLevel = gameState.level;
+                const nextLevel = LEVELS.find(l => l.level === currentLevel + 1);
+
+                let levelUpMessage = "";
+                if (nextLevel && gameState.xp >= nextLevel.xpNeeded) {
+                    gameState.level = nextLevel.level;
+                    levelUpMessage = ` ¡Has ascendido a ${nextLevel.title}! 🎉`;
+                }
+
+                alertUser(`¡Misión Cumplida! Ganaste ${mission.rewardXP} XP y ${mission.rewardEC} EC. ${levelUpMessage}`, "text-green-400");
+
+                // Guardar y renderizar la nueva misión
+                saveGameState();
+                renderGame();
+
+            } else {
+                alertUser("Respuesta incorrecta. ¡Vuelve a intentarlo y revisa tus conceptos!", "text-red-400");
+            }
+        };
+
+
+        // --- Funciones para el Modal de Reglas y Tienda (UX) ---
+        
+        // Muestra u oculta el modal
+        window.showRulesModal = (show) => {
+            const modal = document.getElementById('rules-shop-modal');
+            if (show) {
+                modal.classList.remove('hidden');
+                renderShopItems();
+            } else {
+                modal.classList.add('hidden');
+            }
+        };
+
+        // Lógica de compra de un ítem
+        window.buyItem = (itemId) => {
+            const item = SHOP_ITEMS.find(i => i.id === itemId);
+            if (!item) {
+                alertUser("Ítem no encontrado.", "text-red-400");
+                return;
+            }
+
+            if (gameState.ecCoins >= item.cost) {
+                // Realizar la compra
+                gameState.ecCoins -= item.cost;
+                saveGameState();
+                
+                // NOTA: En un sistema real, aquí se guardaría el registro de la compra
+                // para que el profesor lo vea. Aquí solo se informa al alumno.
+                alertUser(`¡${item.name} comprado! Los ${item.cost} EC han sido descontados. Muestra esta pantalla al profesor para canjear tu beneficio.`, "text-yellow-400");
+                renderShopItems(); // Re-renderizar para actualizar el saldo
+            } else {
+                alertUser(`¡No tienes suficientes Eco-Coins! Necesitas ${item.cost} EC.`, "text-red-400");
+            }
+        }
+
+        // Renderiza dinámicamente los ítems de la tienda
+        function renderShopItems() {
+            if (!gameState) return;
+            const shopContent = document.getElementById('shop-content');
+            
+            const shopHTML = SHOP_ITEMS.map(item => {
+                const canAfford = gameState.ecCoins >= item.cost;
+                return `
+                    <div class="p-4 bg-gray-700 rounded-lg shadow-md flex flex-col sm:flex-row justify-between items-center transition-transform hover:scale-[1.02]">
+                        <div class="text-center sm:text-left mb-2 sm:mb-0 w-full">
+                            <p class="font-bold text-lg text-white">${item.name}</p>
+                            <p class="text-sm text-gray-400">${item.benefit}</p>
+                        </div>
+                        <button onclick="buyItem(${item.id})"
+                                class="w-full sm:w-auto ml-0 sm:ml-4 py-2 px-4 rounded-full font-bold text-sm transition-colors duration-200 
+                                ${canAfford ? 'bg-green-500 text-gray-900 hover:bg-green-400' : 'bg-red-500 text-white opacity-50 cursor-not-allowed'}"
+                                ${!canAfford ? 'disabled' : ''}>
+                            ${item.cost} EC
+                        </button>
+                    </div>
+                `;
+            }).join('');
+
+            shopContent.innerHTML = shopHTML;
+        }
+
+
+        // Iniciar la aplicación al cargar la ventana
+        window.onload = initializeFirebase;
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937; /* Gray-800 */
+            color: white;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <!-- Título Principal -->
+        <header class="text-center mb-10 p-6 bg-blue-900 rounded-3xl shadow-xl">
+            <h1 class="text-4xl font-black text-white uppercase tracking-wider">ECO-CHALLENGE</h1>
+            <p class="text-blue-300 mt-1 text-sm sm:text-lg">Simulador de Analista Financiero</p>
+            <!-- Muestra el ID de la sesión para que el profesor pueda identificar al alumno -->
+            <p id="user-id-display" class="text-xs text-gray-400 mt-2 break-all"></p> 
+        </header>
+
+        <!-- Mensaje de Estado / Resultado -->
+        <div id="status-message" class="text-center text-gray-400 font-medium mb-4">
+            Conectando a la base de datos...
+        </div>
+
+        <!-- Dashboard / Indicadores de Juego -->
+        <section id="dashboard" class="mb-10 p-4 bg-gray-900 rounded-xl shadow-lg border-t-4 border-blue-600">
+            <!-- Contenido del Dashboard se renderiza con JS -->
+        </section>
+
+        <!-- Misión Actual -->
+        <section class="mt-8">
+            <h2 class="text-2xl font-bold text-white mb-4">Misión Actual: Desafío de Conceptos</h2>
+            <div id="mission-card">
+                <!-- Tarjeta de Misión se renderiza con JS -->
+                <div class="p-6 bg-gray-800 rounded-xl shadow-2xl text-center text-gray-400">
+                    Cargando misión...
+                </div>
+            </div>
+        </section>
+
+        <footer class="mt-12 text-center text-xs text-gray-500 p-4 border-t border-gray-700">
+            <p>&copy; 2024 Eco-Challenge. Gamificación para la Educación Económica.</p>
+        </footer>
+    </div>
+
+    <!-- Modal de Reglas y Tienda (Ventana emergente) -->
+    <div id="rules-shop-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-95 z-50 overflow-y-auto p-4 sm:p-8">
+        <div class="max-w-3xl mx-auto bg-gray-800 rounded-xl shadow-2xl p-6 sm:p-8 border-t-4 border-yellow-500">
+            <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-3">
+                <h2 class="text-3xl font-black text-yellow-400">REGLAS Y TIENDA DE RECOMPENSAS</h2>
+                <button onclick="showRulesModal(false)" class="text-gray-300 hover:text-white text-2xl font-bold p-2 leading-none">
+                    &times;
+                </button>
+            </div>
+
+            <!-- SECCIÓN 1: REGLAS DE PROGRESIÓN (XP y Niveles) -->
+            <h3 class="text-xl font-bold text-white mb-3">1. Progresión: XP (Puntos de Experiencia)</h3>
+            <ul class="list-disc list-inside space-y-2 text-gray-300 ml-4 mb-8">
+                <li>Los **XP** se ganan al completar correctamente las Misiones de Conceptos y las Simulaciones.</li>
+                <li>Acumular XP te permite **ascender de Nivel** (Rol de Analista).</li>
+                <li>El Nivel representa tu dominio y desbloquea el acceso a Misiones más complejas.</li>
+            </ul>
+
+            <div class="bg-gray-700 p-4 rounded-lg mb-8 shadow-inner">
+                <h4 class="text-lg font-bold text-yellow-400 mb-2">Roles de Analista (Niveles):</h4>
+                <div class="grid grid-cols-2 gap-4 text-sm text-gray-200">
+                    ${LEVELS.map(level => `
+                        <p class="font-semibold">Nivel ${level.level}: <span class="text-white">${level.title}</span> (${level.xpNeeded} XP)</p>
+                    `).join('')}
+                </div>
+            </div>
+            
+            <!-- SECCIÓN 2: LA TIENDA DE RECOMPENSAS (Eco-Coins) -->
+            <h3 class="text-xl font-bold text-white mb-3 mt-8">2. La Moneda: Eco-Coins (EC)</h3>
+            <p class="text-gray-300 mb-6">Los **Eco-Coins (EC)** son tu moneda de cambio. Se ganan al completar las misiones y se usan para comprar **ventajas académicas** en la tienda a continuación. ¡Gasta sabiamente!</p>
+
+            <div id="shop-content" class="space-y-4">
+                <!-- Los ítems de la tienda se renderizan aquí mediante JS -->
+            </div>
+
+            <p class="mt-8 text-center text-sm text-yellow-500 bg-gray-700 p-3 rounded-lg">
+                <span class="font-bold">¡IMPORTANTE!</span> El ID de Sesión (${userId || 'N/A'}) es tu comprobante. Para canjear cualquier ítem de la tienda, debes mostrar esta pantalla al profesor para confirmar la compra y el descuento de tus EC.
+            </p>
+
+        </div>
+    </div>
+
+</body>
+
+</html>
