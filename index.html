@@ -13,7 +13,14 @@
 
         // --- Variables Globales del Entorno (MANDATORIO para Canvas) ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const firebaseConfig = {
+  apiKey: "AIzaSyCjW-VLPOQ9n2akZTU3TnprM6iFQvEqsY0",
+  authDomain: "eco-challenger.firebaseapp.com",
+  projectId: "eco-challenger",
+  storageBucket: "eco-challenger.firebasestorage.app",
+  messagingSenderId: "925233443384",
+  appId: "1:925233443384:web:737cd67f522656da766ccd"
+};
 
         let db;
         let auth;
@@ -478,4 +485,5 @@
     </div>
 
 </body>
+
 </html>
